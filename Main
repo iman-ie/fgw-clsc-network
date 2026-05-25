@@ -1,0 +1,474 @@
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import warnings, os
+warnings.filterwarnings('ignore')
+
+try:
+    import ot
+except ImportError:
+    import subprocess; subprocess.run(['pip','install','POT','-q']); import ot
+
+
+INSTANCES = [
+    dict(num=1,  I=2,  J=2,  K=2,  T=2,  L=2,  N=3,  M=2,  E=10,  size='Small'),
+    dict(num=2,  I=2,  J=3,  K=5,  T=4,  L=3,  N=8,  M=3,  E=15,  size='Small'),
+    dict(num=3,  I=3,  J=3,  K=6,  T=5,  L=3,  N=12, M=4,  E=18,  size='Small'),
+    dict(num=4,  I=4,  J=4,  K=8,  T=6,  L=4,  N=16, M=5,  E=20,  size='Small'),
+    dict(num=5,  I=5,  J=4,  K=10, T=7,  L=5,  N=19, M=6,  E=25,  size='Small'),
+    dict(num=6,  I=6,  J=5,  K=10, T=8,  L=6,  N=22, M=7,  E=28,  size='Small'),
+    dict(num=7,  I=8,  J=5,  K=12, T=9,  L=7,  N=28, M=8,  E=30,  size='Small'),
+    dict(num=8,  I=10, J=6,  K=12, T=10, L=8,  N=33, M=9,  E=35,  size='Small'),
+    dict(num=9,  I=12, J=10, K=18, T=13, L=10, N=50, M=14, E=50,  size='Medium'),
+    dict(num=10, I=14, J=11, K=20, T=14, L=12, N=55, M=15, E=55,  size='Medium'),
+    dict(num=11, I=16, J=12, K=20, T=15, L=14, N=60, M=16, E=60,  size='Medium'),
+    dict(num=12, I=18, J=13, K=22, T=17, L=15, N=65, M=17, E=65,  size='Medium'),
+    dict(num=13, I=20, J=14, K=22, T=19, L=17, N=70, M=18, E=70,  size='Medium'),
+    dict(num=14, I=22, J=15, K=24, T=20, L=18, N=75, M=19, E=75,  size='Medium'),
+    dict(num=15, I=25, J=16, K=24, T=22, L=19, N=79, M=20, E=80,  size='Medium'),
+    dict(num=16, I=30, J=17, K=26, T=25, L=20, N=83, M=21, E=85,  size='Medium'),
+    dict(num=17, I=35, J=20, K=34, T=30, L=25, N=103,M=27, E=100, size='Large'),
+    dict(num=18, I=38, J=21, K=35, T=32, L=28, N=107,M=28, E=110, size='Large'),
+    dict(num=19, I=40, J=22, K=37, T=33, L=29, N=111,M=29, E=120, size='Large'),
+    dict(num=20, I=45, J=24, K=39, T=35, L=30, N=115,M=30, E=130, size='Large'),
+    dict(num=21, I=50, J=25, K=40, T=37, L=32, N=119,M=31, E=140, size='Large'),
+    dict(num=22, I=53, J=28, K=42, T=40, L=33, N=123,M=32, E=150, size='Large'),
+    dict(num=23, I=58, J=29, K=42, T=42, L=34, N=127,M=33, E=170, size='Large'),
+    dict(num=24, I=60, J=30, K=43, T=43, L=35, N=131,M=34, E=200, size='Large'),
+]
+
+ALPHAS = np.round(np.arange(0.0, 1.01, 0.1), 2)
+RNG    = np.random.default_rng(42)
+
+ARCS  = ['A1','A2','A3','A4','A5','A6']
+COLS  = ['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd','#8c564b']
+DASH  = ['-','--',':','-.','--',':']
+MARKS = ['o','s','^','D','v','P']
+ARC_LABELS = {
+    'A1':'A1: E→CC','A2':'A2: CC→PC','A3':'A3: PC→TC',
+    'A4':'A4: TC→RC','A5':'A5: RC→DPC','A6':'A6: FC→TC'
+}
+
+_BASE_CITIES = [
+    (35.70,51.40),(32.70,51.70),(29.60,52.50),(36.30,59.60),(37.30,49.60),
+    (35.00,46.30),(37.50,45.10),(34.80,48.50),(30.28,57.08),(38.08,46.30),
+    (31.90,54.37),(36.56,53.05),(33.39,48.35),(35.10,33.80),(29.97,50.83),
+    (34.64,50.88),(33.99,48.00),(36.18,44.02),(27.19,56.28),(34.30,47.07),
+    (30.32,48.66),(32.90,59.22),(37.94,48.53),(34.00,49.70),(35.57,52.00),
+    (36.82,54.43),(37.05,54.80),(36.67,51.42),(34.32,49.52),(30.67,50.93),
+]
+_POOL = []
+for lat, lon in _BASE_CITIES * 9:
+    _POOL.append((lat + RNG.uniform(-1.5, 1.5), lon + RNG.uniform(-1.5, 1.5)))
+_POOL = _POOL[:250]
+
+
+def pick_coords(n, offset=0):
+    pool = _POOL * 3
+    return pool[offset % 250: offset % 250 + n]
+
+
+def haversine_matrix(coords):
+    n = len(coords)
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            la1, lo1 = np.radians(coords[i])
+            la2, lo2 = np.radians(coords[j])
+            a = (np.sin((la2 - la1) / 2) ** 2 +
+                 np.cos(la1) * np.cos(la2) * np.sin((lo2 - lo1) / 2) ** 2)
+            D[i, j] = 6371 * 2 * np.arcsin(np.sqrt(np.clip(a, 0, 1)))
+    mx = D.max()
+    return D / mx if mx > 1e-9 else D
+
+
+def make_weights(caps):
+    w = np.array(caps, dtype=float)
+    return w / w.sum()
+
+
+def feature_cost_matrix(A, B, weights):
+    A, B = np.array(A, dtype=float).copy(), np.array(B, dtype=float).copy()
+    d = min(A.shape[1], B.shape[1], len(weights))
+    A, B = A[:, :d], B[:, :d]
+    w = np.array(weights[:d], dtype=float)
+    w /= w.sum()
+    for c in range(d):
+        r = A[:, c].max() - A[:, c].min()
+        A[:, c] = (A[:, c] - A[:, c].min()) / r if r > 1e-9 else np.zeros(len(A))
+    for c in range(d):
+        r = B[:, c].max() - B[:, c].min()
+        B[:, c] = (B[:, c] - B[:, c].min()) / r if r > 1e-9 else np.zeros(len(B))
+    M = np.array([[float(np.sum(w * (A[i] - B[j]) ** 2))
+                   for j in range(len(B))] for i in range(len(A))])
+    z = M.max()
+    return M / z if z > 1e-9 else M
+
+
+def gw_loss_val(T, C1, C2):
+    diff  = C1[:, :, None, None] - C2[None, None, :, :]
+    outer = T[:, None, :, None] * T[None, :, None, :]
+    return float(np.sum(diff ** 2 * outer))
+
+
+def solve_fgw_arc(mu, nu, M, C1, C2, alpha):
+    mu = mu / mu.sum()
+    nu = nu / nu.sum()
+    T, _ = ot.gromov.fused_gromov_wasserstein(
+        M, C1, C2, mu, nu, loss_fun='square_loss', alpha=alpha,
+        armijo=False, symmetric=True, log=True, verbose=False)
+    feat   = float((1 - alpha) * np.sum(T * M))
+    struct = float(alpha * gw_loss_val(T, C1, C2))
+    fgw    = feat + struct
+    return T, fgw, feat, struct, float(np.mean(T < 1e-8))
+
+
+def build_instance(inst):
+    I, J, K, T, L, N = inst['I'], inst['J'], inst['K'], inst['T'], inst['L'], inst['N']
+    p = {
+        'Fyj':   RNG.uniform(100, 400, J),  'Fui':  RNG.uniform(500, 1000, I),
+        'Fvk':   RNG.uniform(200, 600, K),  'Fxt':  RNG.uniform(100, 200, T),
+        'Fgl':   RNG.uniform(100, 200, L),
+        'Cui':   RNG.uniform(5, 15, I),     'Cyj':  RNG.uniform(2, 6, J),
+        'Cvk':   RNG.uniform(5, 10, K),     'Cxt':  RNG.uniform(1, 5, T),
+        'Cgl':   RNG.uniform(1, 6, L),
+        'Cpui':  RNG.uniform(400, 600, I),  'Cpyj': RNG.uniform(400, 500, J),
+        'Cpvk':  RNG.uniform(400, 800, K),  'Cpxt': RNG.uniform(400, 500, T),
+        'Cpgl':  RNG.uniform(400, 500, L),
+        'DCn':   RNG.uniform(20, 50, N),    'Tpe':  RNG.uniform(200, 400, I),
+        'kappa_k': np.full(K, 2.0), 'eta_n': np.full(N, 0.2), 'theta_i': np.full(I, 0.1),
+        'Cfki':  RNG.uniform(1, 10, (K, I)), 'Cdnj': RNG.uniform(1, 10, (N, J)),
+        'CO2_CC': RNG.uniform(0.8, 1.5, L), 'CO2_PC': RNG.uniform(0.5, 1.2, T),
+        'CO2_TC': RNG.uniform(0.5, 1.2, J), 'CO2_RC': RNG.uniform(0.5, 1.0, K),
+        'CO2_FC': RNG.uniform(0.3, 0.8, N),
+        'yield_PC': RNG.uniform(0.6, 0.9, T), 'yield_TC': RNG.uniform(0.7, 0.95, J),
+        'qual_RC':  RNG.uniform(0.75, 0.95, K), 'acc_E': RNG.uniform(0.5, 1.0, I),
+    }
+    off = inst['num'] * 10
+    Cm = {
+        'E':   haversine_matrix(pick_coords(I,   off + 0)),
+        'CC':  haversine_matrix(pick_coords(L,   off + 2)),
+        'PC':  haversine_matrix(pick_coords(T,   off + 4)),
+        'TC':  haversine_matrix(pick_coords(J,   off + 6)),
+        'RC':  haversine_matrix(pick_coords(K,   off + 8)),
+        'DPC': haversine_matrix(pick_coords(I,   off + 10)),
+        'FC':  haversine_matrix(pick_coords(N,   off + 1)),
+    }
+    Ef   = np.column_stack([p['Tpe'],  p['acc_E']])
+    CCf  = np.column_stack([p['Cpgl'], p['Cgl'],  p['CO2_CC']])
+    PCf  = np.column_stack([p['Cpxt'], p['Cxt'],  p['yield_PC']])
+    TCf  = np.column_stack([p['Cpyj'], p['Cyj'],  p['yield_TC'], p['CO2_TC']])
+    RCf  = np.column_stack([p['Cpvk'] * p['kappa_k'], p['Cvk'], p['CO2_RC'], p['qual_RC']])
+    DPCf = np.column_stack([p['Cpui'], p['Cui'],  p['DCn'][:I]])
+    FCf  = np.column_stack([p['DCn'] * p['eta_n'], p['Cdnj'].mean(axis=1), p['CO2_FC']])
+
+    return [
+        dict(id='A1', src='E',     snk='CC',  C1=Cm['E'],   C2=Cm['CC'],
+             src_caps=p['Tpe'],  snk_caps=p['Cpgl'], A=Ef,   B=CCf,  w=[0.20, 0.40, 0.40]),
+        dict(id='A2', src='CC',    snk='PC',  C1=Cm['CC'],  C2=Cm['PC'],
+             src_caps=p['Cpgl'], snk_caps=p['Cpxt'], A=CCf,  B=PCf,  w=[0.33, 0.33, 0.34]),
+        dict(id='A3', src='PC',    snk='TC',  C1=Cm['PC'],  C2=Cm['TC'],
+             src_caps=p['Cpxt'], snk_caps=p['Cpyj'], A=PCf,  B=TCf,  w=[0.20, 0.20, 0.30, 0.30]),
+        dict(id='A4', src='TC',    snk='RC',  C1=Cm['TC'],  C2=Cm['RC'],
+             src_caps=p['Cpyj'], snk_caps=p['Cpvk'], A=TCf,  B=RCf,  w=[0.20, 0.40, 0.40]),
+        dict(id='A5', src='RC',    snk='DPC', C1=Cm['RC'],  C2=Cm['DPC'],
+             src_caps=p['Cpvk'], snk_caps=p['Cpui'], A=RCf,  B=DPCf, w=[0.10, 0.10, 0.40, 0.40]),
+        dict(id='A6', src='FC',    snk='TC',  C1=Cm['FC'],  C2=Cm['TC'],
+             src_caps=p['DCn'],  snk_caps=p['Cpyj'], A=FCf,  B=TCf,  w=[0.33, 0.33, 0.34]),
+    ]
+
+
+def solve_instance(arcs):
+    rows = []
+    for arc in arcs:
+        M_arc = feature_cost_matrix(arc['A'], arc['B'], arc['w'])
+        mu    = make_weights(arc['src_caps'])
+        nu    = make_weights(arc['snk_caps'])
+        gap   = float(max(np.sum(arc['src_caps']) - np.sum(arc['snk_caps']), 0))
+        rho   = float(min(np.sum(arc['snk_caps']) / np.sum(arc['src_caps']), 1.0))
+        for alpha in ALPHAS:
+            _, fgw, feat, struct, sparsity = solve_fgw_arc(
+                mu, nu, M_arc, arc['C1'], arc['C2'], alpha)
+            rows.append(dict(
+                arc=arc['id'], src=arc['src'], snk=arc['snk'],
+                alpha=alpha,
+                fgw=round(fgw, 6), feat_cost=round(feat, 6),
+                struct_cost=round(struct, 6),
+                feat_share=round(feat / fgw if fgw > 1e-9 else 0, 4),
+                sparsity=round(sparsity, 4),
+                rho=round(rho, 4), gap_units=round(gap, 2)
+            ))
+    return pd.DataFrame(rows)
+
+
+def plot_instance(df, inst, out_dir):
+    df05 = df[df.alpha == 0.5].copy()
+    num  = inst['num']
+    lbl  = (f"Problem {num} ({inst['size']}) | "
+            f"I={inst['I']},J={inst['J']},K={inst['K']},"
+            f"T={inst['T']},L={inst['L']},N={inst['N']}")
+    TSZ, LSZ, TICK = 11, 9, 8
+
+    # Fig 1: α-frontier
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for i, arc in enumerate(ARCS):
+        d = df[df.arc == arc]
+        ax.plot(d.alpha, d.fgw, color=COLS[i], ls=DASH[i], lw=2,
+                marker=MARKS[i], ms=4, label=ARC_LABELS[arc])
+    ax.set_xlabel('α', fontsize=LSZ); ax.set_ylabel('FGW Cost', fontsize=LSZ)
+    ax.set_title(f'FGW Cost vs α — {lbl}', fontsize=TSZ, fontweight='bold')
+    ax.legend(fontsize=TICK, bbox_to_anchor=(1.01, 1), loc='upper left', framealpha=0.9)
+    ax.tick_params(labelsize=TICK); ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/fig1_alpha_frontier.png', dpi=130, bbox_inches='tight')
+    plt.close()
+
+    # Fig 2: Cost decomposition stacked bar
+    df05s  = df05.sort_values('fgw')
+    labels = [ARC_LABELS[a] for a in df05s.arc]
+    fc, sc = df05s.feat_cost.values, df05s.struct_cost.values
+    y = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.barh(y, fc, color='#1f77b4', label='Feature Cost',    height=0.55)
+    ax.barh(y, sc, left=fc, color='#ff7f0e', label='Structural Cost', height=0.55)
+    for i, (f, s) in enumerate(zip(fc, sc)):
+        if f > 0.02: ax.text(f/2,   i, f'{f:.3f}', ha='center', va='center',
+                             fontsize=7, color='white', fontweight='bold')
+        if s > 0.01: ax.text(f+s/2, i, f'{s:.3f}', ha='center', va='center',
+                             fontsize=7, color='white', fontweight='bold')
+    ax.set_yticks(y); ax.set_yticklabels(labels, fontsize=TICK)
+    ax.set_xlabel('FGW Cost', fontsize=LSZ)
+    ax.set_title(f'Cost Decomposition at α=0.5 — {lbl}', fontsize=TSZ, fontweight='bold')
+    ax.legend(fontsize=TICK, loc='lower right')
+    ax.grid(True, axis='x', alpha=0.3); fig.tight_layout()
+    fig.savefig(f'{out_dir}/fig2_cost_decomp.png', dpi=130)
+    plt.close()
+
+    # Fig 3: Feature share vs α
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    for i, arc in enumerate(ARCS):
+        d = df[df.arc == arc]
+        ax.plot(d.alpha, d.feat_share * 100, color=COLS[i], ls=DASH[i],
+                lw=2, marker=MARKS[i], ms=4, label=ARC_LABELS[arc])
+    ax.axhline(50, color='gray', ls=':', lw=1.5)
+    ax.set_xlabel('α', fontsize=LSZ); ax.set_ylabel('Feature Cost Share (%)', fontsize=LSZ)
+    ax.set_title(f'Feature Share vs α — {lbl}', fontsize=TSZ, fontweight='bold')
+    ax.legend(fontsize=TICK, bbox_to_anchor=(1.01, 1), loc='upper left', framealpha=0.9)
+    ax.tick_params(labelsize=TICK); ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/fig3_feat_share.png', dpi=130, bbox_inches='tight')
+    plt.close()
+
+    # Fig 4: Bottleneck ranking bar chart
+    df05r = df05.sort_values('fgw', ascending=False)
+    bc = ['#d62728' if i == 0 else '#1f77b4' for i in range(len(df05r))]
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.bar([ARC_LABELS[a] for a in df05r.arc], df05r.fgw,
+                  color=bc, width=0.6, edgecolor='white', linewidth=0.8)
+    for bar, val in zip(bars, df05r.fgw):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
+                f'{val:.4f}', ha='center', va='bottom', fontsize=8, fontweight='bold')
+    ax.set_xlabel('Arc', fontsize=LSZ); ax.set_ylabel('FGW Cost', fontsize=LSZ)
+    ax.set_title(f'Bottleneck Ranking at α=0.5 — {lbl}', fontsize=TSZ, fontweight='bold')
+    ax.tick_params(axis='x', rotation=20, labelsize=TICK)
+    ax.set_ylim(0, df05r.fgw.max() * 1.18); ax.grid(True, axis='y', alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/fig4_bottleneck_rank.png', dpi=130)
+    plt.close()
+
+    # Fig 5: 2×3 panel feature vs structural frontiers
+    fig, axes = plt.subplots(2, 3, figsize=(13, 7), sharex=True)
+    axes = axes.flatten()
+    for i, arc in enumerate(ARCS):
+        d = df[df.arc == arc]
+        axes[i].plot(d.alpha, d.feat_cost,   color='#1f77b4', lw=2,
+                     marker='o', ms=3, label='Feature')
+        axes[i].plot(d.alpha, d.struct_cost, color='#ff7f0e', lw=2,
+                     ls='--', marker='s', ms=3, label='Structural')
+        axes[i].set_title(ARC_LABELS[arc], fontsize=9, fontweight='bold')
+        axes[i].set_xlabel('α', fontsize=8); axes[i].set_ylabel('Cost', fontsize=8)
+        axes[i].tick_params(labelsize=7); axes[i].grid(True, alpha=0.25)
+        if i == 0: axes[i].legend(fontsize=7)
+    fig.suptitle(f'Feature & Structural Frontiers — {lbl}',
+                 fontsize=10, fontweight='bold', y=1.01)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/fig5_panel_frontiers.png', dpi=130, bbox_inches='tight')
+    plt.close()
+
+    # Fig 6: Capacity gap
+    dg = df05[['arc', 'rho', 'gap_units']].copy()
+    dg['label'] = dg.arc.map(ARC_LABELS)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    rho_c = ['#d62728' if v < 1 else '#2ca02c' for v in dg.rho]
+    ax1.bar(dg.label, dg.rho, color=rho_c, width=0.6)
+    for i, v in enumerate(dg.rho):
+        ax1.text(i, v + 0.002, f'{v:.3f}', ha='center', va='bottom',
+                 fontsize=8, fontweight='bold')
+    ax1.axhline(1.0, color='gray', ls=':', lw=1.5)
+    ax1.set_ylim(max(0.7, dg.rho.min() - 0.05), 1.08)
+    ax1.set_title('Rescaling Factor ρ', fontsize=TSZ, fontweight='bold')
+    ax1.set_xlabel('Arc', fontsize=LSZ); ax1.set_ylabel('ρ', fontsize=LSZ)
+    ax1.tick_params(axis='x', rotation=20, labelsize=TICK)
+    ax1.grid(True, axis='y', alpha=0.3)
+    gap_c = ['#d62728' if v > 0 else '#2ca02c' for v in dg.gap_units]
+    ax2.bar(dg.label, dg.gap_units, color=gap_c, width=0.6)
+    for i, v in enumerate(dg.gap_units):
+        if v > 0: ax2.text(i, v + 1, f'{v:.0f}', ha='center', va='bottom',
+                           fontsize=8, fontweight='bold')
+    ax2.set_title('Residual Capacity Gap (units/yr)', fontsize=TSZ, fontweight='bold')
+    ax2.set_xlabel('Arc', fontsize=LSZ); ax2.set_ylabel('Gap', fontsize=LSZ)
+    ax2.tick_params(axis='x', rotation=20, labelsize=TICK)
+    ax2.grid(True, axis='y', alpha=0.3)
+    fig.suptitle(f'Capacity Balance — {lbl}', fontsize=10, fontweight='bold', y=1.01)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/fig6_capacity_gap.png', dpi=130, bbox_inches='tight')
+    plt.close()
+
+
+def plot_summary(summary_df, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    size_colors = {'Small': '#1f77b4', 'Medium': '#ff7f0e', 'Large': '#2ca02c'}
+
+    # Fig A: Bottleneck cost trend
+    fig, ax = plt.subplots(figsize=(14, 5))
+    for sz, color in size_colors.items():
+        sub = summary_df[summary_df['size'] == sz]
+        ax.scatter(sub['problem'], sub['bottleneck_fgw'], color=color, label=sz, s=60, zorder=3)
+        ax.plot(sub['problem'], sub['bottleneck_fgw'], color=color, lw=1.5, alpha=0.6)
+    ax.set_xlabel('Problem Number', fontsize=10)
+    ax.set_ylabel('Max FGW Cost at α=0.5', fontsize=10)
+    ax.set_title('Bottleneck Arc FGW Cost across 24 Instances', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9); ax.grid(True, alpha=0.3); ax.set_xticks(range(1, 25))
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/figA_bottleneck_trend.png', dpi=130)
+    plt.close()
+
+    # Fig B: Bottleneck arc identity
+    arc_map = {a: i for i, a in enumerate(ARCS)}
+    bottleneck_ids = summary_df['bottleneck_arc'].map(arc_map).values
+    problems = summary_df['problem'].values
+    fig, ax = plt.subplots(figsize=(14, 3))
+    sc = ax.scatter(problems, [0] * len(problems), c=bottleneck_ids,
+                    cmap='tab10', s=300, vmin=0, vmax=5, zorder=3)
+    for p, a in zip(problems, summary_df['bottleneck_arc']):
+        ax.text(p, 0.12, a, ha='center', va='bottom', fontsize=7.5, fontweight='bold')
+    ax.set_xlabel('Problem Number', fontsize=10); ax.set_yticks([])
+    ax.set_title('Bottleneck Arc Identity across 24 Instances (α=0.5)',
+                 fontsize=12, fontweight='bold')
+    ax.set_xticks(range(1, 25))
+    cbar = plt.colorbar(sc, ax=ax, orientation='horizontal', pad=0.25, fraction=0.05)
+    cbar.set_ticks(range(6)); cbar.set_ticklabels(ARCS); cbar.ax.tick_params(labelsize=8)
+    ax.grid(True, axis='x', alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/figB_bottleneck_identity.png', dpi=130, bbox_inches='tight')
+    plt.close()
+
+    # Fig C: Mean FGW per arc by size
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(ARCS)); w = 0.25
+    for idx, (sz, color) in enumerate(size_colors.items()):
+        sub   = summary_df[summary_df['size'] == sz]
+        means = [sub[f'fgw_{a}'].mean() for a in ARCS]
+        bars  = ax.bar(x + (idx - 1) * w, means, w, label=sz,
+                       color=color, edgecolor='white')
+        for bar, v in zip(bars, means):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.002,
+                    f'{v:.3f}', ha='center', va='bottom', fontsize=7.5)
+    ax.set_xticks(x); ax.set_xticklabels([ARC_LABELS[a] for a in ARCS], rotation=15, fontsize=9)
+    ax.set_ylabel('Mean FGW Cost at α=0.5', fontsize=10)
+    ax.set_title('Mean FGW Cost per Arc by Problem Size', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=9); ax.grid(True, axis='y', alpha=0.3)
+    ax.set_ylim(0, summary_df[[f'fgw_{a}' for a in ARCS]].values.max() * 1.2)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/figC_mean_fgw_by_arc.png', dpi=130)
+    plt.close()
+
+    # Fig D: Feature share trend
+    fig, ax = plt.subplots(figsize=(14, 5))
+    for i, arc in enumerate(ARCS):
+        ax.plot(summary_df['problem'], summary_df[f'feat_share_{arc}'] * 100,
+                color=COLS[i], ls=DASH[i], lw=2, marker=MARKS[i], ms=5,
+                label=ARC_LABELS[arc])
+    ax.axhline(50, color='gray', ls=':', lw=1.5)
+    ax.set_xlabel('Problem Number', fontsize=10)
+    ax.set_ylabel('Feature Cost Share (%)', fontsize=10)
+    ax.set_title('Feature Cost Share (α=0.5) across 24 Instances', fontsize=12, fontweight='bold')
+    ax.legend(fontsize=8, bbox_to_anchor=(1.01, 1), loc='upper left')
+    ax.set_xticks(range(1, 25)); ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(f'{out_dir}/figD_feat_share_trend.png', dpi=130, bbox_inches='tight')
+    plt.close()
+
+    print(f"  Cross-instance figures saved to {out_dir}/")
+
+
+if __name__ == '__main__':
+    summary_rows = []
+    all_dfs = {}
+
+    for inst in INSTANCES:
+        num = inst['num']
+        print(f"Solving Problem {num:02d}/{len(INSTANCES)} "
+              f"({inst['size']}: I={inst['I']},J={inst['J']},K={inst['K']},"
+              f"T={inst['T']},L={inst['L']},N={inst['N']}) ...",
+              end=' ', flush=True)
+        try:
+            out_dir = f'results24/problem_{num:02d}'
+            os.makedirs(out_dir, exist_ok=True)
+
+            arcs = build_instance(inst)
+            df   = solve_instance(arcs)
+            all_dfs[num] = df
+
+            df.to_csv(f'{out_dir}/fgw_all_arcs.csv', index=False)
+            df[df.alpha == 0.5].to_csv(f'{out_dir}/fgw_summary_alpha05.csv', index=False)
+            plot_instance(df, inst, out_dir)
+            print(f"✓")
+
+            row = dict(problem=num, size=inst['size'],
+                       I=inst['I'], J=inst['J'], K=inst['K'],
+                       T=inst['T'], L=inst['L'], N=inst['N'])
+            df05 = df[df.alpha == 0.5]
+            for arc in ARCS:
+                r = df05[df05.arc == arc]
+                row[f'fgw_{arc}']        = round(r['fgw'].values[0],        6) if len(r) else 0
+                row[f'feat_share_{arc}'] = round(r['feat_share'].values[0], 4) if len(r) else 0
+            row['bottleneck_arc'] = df05.loc[df05['fgw'].idxmax(), 'arc']
+            row['bottleneck_fgw'] = round(df05['fgw'].max(), 6)
+            summary_rows.append(row)
+
+        except Exception as e:
+            print(f"\n  ERROR on Problem {num}: {e}")
+            import traceback; traceback.print_exc()
+            continue
+
+    if not summary_rows:
+        print("ERROR: No instances completed. Check errors above.")
+    else:
+        summary_df = pd.DataFrame(summary_rows)
+        os.makedirs('results24', exist_ok=True)
+        summary_df.to_csv('results24/summary_all_instances.csv', index=False)
+        print(f"\nSummary CSV saved ({len(summary_rows)}/24 instances).")
+
+        if all_dfs:
+            all_frames = []
+            for num, df in all_dfs.items():
+                inst = next(i for i in INSTANCES if i['num'] == num)
+                df_copy = df.copy()
+                for col_idx, (col_name, col_val) in enumerate([
+                    ('problem', num), ('size', inst['size']),
+                    ('I', inst['I']), ('J', inst['J']), ('K', inst['K']),
+                    ('T', inst['T']), ('L', inst['L']), ('N', inst['N'])
+                ]):
+                    df_copy.insert(col_idx, col_name, col_val)
+                all_frames.append(df_copy)
+
+            master_df = pd.concat(all_frames, ignore_index=True)
+            master_df.to_csv('results24/full_results_all_instances_all_alpha.csv', index=False)
+            print(f"Full results CSV saved: {len(master_df)} rows.")
+
+        plot_summary(summary_df, 'results24/cross_instance')
+        print("\nBottleneck summary at α=0.5:")
+        print(summary_df[['problem', 'size', 'bottleneck_arc', 'bottleneck_fgw']].to_string(index=False))
